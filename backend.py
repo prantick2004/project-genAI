@@ -1,9 +1,11 @@
 import os
+import time
 import fitz
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import chromadb
 from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 upload_folder = "uploads"
@@ -24,7 +26,7 @@ for page in doc:
 
 #print(text)
 
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
 chunks = text_splitter.split_text(text)
 """print("Number of chunks:", len(chunks))
 print("Sample chunk:", chunks[:])"""
@@ -58,7 +60,7 @@ collection.add(
 query = input("\nAsk your question: ")
 query_embedding = embed_model.encode(query, normalize_embeddings=True)
 
-result = collection.query(query_embeddings=[query_embedding.tolist()],n_results=1,)
+result = collection.query(query_embeddings=[query_embedding.tolist()],n_results=4,)
 
 retrieved_chunks = result["documents"][0]
 
@@ -72,6 +74,7 @@ prompt = f"""
 You are a helpful document assistant. Answer the user's question using ONLY the information provided in the context below. If the answer can not be found in the context, say: "I could not find the answer in the given document."
 
 Do not use your own knowledge or make up information.
+Combine all context pieces before answering.
 
 Context:
 {context}
@@ -83,12 +86,32 @@ Answer:
 """
 
 load_dotenv()
-client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-
-response = client.models.generate_content(
-    model="gemini-3.8-flash",
-    contents=prompt,
+genai_client = genai.Client(
+    api_key=os.getenv("GOOGLE_API_KEY"),
+    http_options=types.HttpOptions(timeout=30000),
 )
-answer = response.text
+
+MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
+
+answer = None
+for model_name in MODELS:
+    for attempt in range(2):
+        try:
+            response = genai_client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0),
+            )
+            answer = response.text
+            print("\n(answered by:", model_name + ")")
+            break
+        except Exception as e:
+            print(f"{model_name} attempt {attempt + 1} failed: {e}")
+            time.sleep(3)
+    if answer is not None:
+        break
+
+if answer is None:
+    answer = "Server busy, please try again in a minute."
 
 print("\nFinal Answer:", answer)
