@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import mimetypes
 import fitz
 from google import genai
 from google.genai import types
@@ -21,21 +22,28 @@ for page in doc:
 
 print("Pages:", len(doc))
 print("Text length:", len(text.strip()))
-if len(text.strip()) < 50:
-    print("Very little text. Maybe scanned invoice (image). Next step will handle this.")
-    raise SystemExit
+
+# no text found = scanned invoice (image). Send the file itself to Gemini.
+is_scanned = len(text.strip()) < 50
+file_part = None
+
+if is_scanned:
+    print("Scanned invoice found. Sending the file directly to Gemini.")
+    mime_type = mimetypes.guess_type(file_path)[0] or "application/pdf"
+    with open(file_path, "rb") as f:
+        file_part = types.Part.from_bytes(data=f.read(), mime_type=mime_type)
 
 # ---------- 3. Gemini helper (try models one by one) ----------
 load_dotenv()
 client = genai.Client(
     api_key=os.getenv("GOOGLE_API_KEY"),
-    http_options=types.HttpOptions(timeout=30000),
+    http_options=types.HttpOptions(timeout=60000),
 )
 
 MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
 
 
-def call_gemini(prompt, as_json=False):
+def call_gemini(prompt, as_json=False, file_part=None):
     config = types.GenerateContentConfig(temperature=0)
     if as_json:
         config = types.GenerateContentConfig(
@@ -43,12 +51,14 @@ def call_gemini(prompt, as_json=False):
             response_mime_type="application/json",
         )
 
+    contents = [file_part, prompt] if file_part else prompt
+
     for model_name in MODELS:
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
                     model=model_name,
-                    contents=prompt,
+                    contents=contents,
                     config=config,
                 )
                 print("(answered by:", model_name + ")")
@@ -60,6 +70,11 @@ def call_gemini(prompt, as_json=False):
 
 
 # ---------- 4. extract invoice details ----------
+if is_scanned:
+    source_block = "The document is attached as a file. Read it from the file."
+else:
+    source_block = f"Document text:\n{text}"
+
 prompt = f"""
 Extract the details from this document.
 The document can contain MORE THAN ONE separate bill (Tax Invoice, Bill of Supply, etc).
@@ -70,6 +85,7 @@ Rules:
 - Do NOT put "details of goods transported" or any shipping/consignment table into items.
 - Tax can be CGST + SGST, or IGST. Fill only what the bill shows, others null.
 - invoice_number must be only the number itself, without symbols like "#".
+- Copy numbers exactly as printed. If a number is not clear to read, use null.
 
 Return ONLY JSON in this format:
 {{
@@ -89,11 +105,10 @@ Return ONLY JSON in this format:
 }}
 If a field is missing in the bill, use null. Do not guess.
 
-Document text:
-{text}
+{source_block}
 """
 
-answer = call_gemini(prompt, as_json=True)
+answer = call_gemini(prompt, as_json=True, file_part=file_part)
 
 if answer is None:
     raise SystemExit("All models busy, try again in a minute.")
@@ -127,6 +142,11 @@ print("Type your question. Type 'exit' to stop.")
 
 history = []
 
+if is_scanned:
+    original_block = ""
+else:
+    original_block = f"Original invoice text (use only if the data above is missing something):\n{text}"
+
 while True:
     try:
         question = input("\nAsk: ").strip()
@@ -151,8 +171,7 @@ Keep the answer short and clear.
 Extracted invoice data:
 {json.dumps(invoices, indent=2)}
 
-Original invoice text (use only if the data above is missing something):
-{text}
+{original_block}
 
 Previous chat:
 {history_text}
